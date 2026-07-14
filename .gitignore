@@ -4,4 +4,4 @@ PLAN.md
 .env
 .venv
 .bob
-
+__pycache__
