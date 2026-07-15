@@ -1,11 +1,12 @@
-"""
-Thin HCS wrapper for TaskForge.
+"""Thin HCS wrapper for TaskForge.
 
 Responsibilities (and nothing else):
 
 - :func:`create_topic` — create a new HCS topic, return its ID string.
 - :func:`submit_message` — submit a JSON payload to an existing topic, return
   the transaction ID string.
+- :func:`poll_topic` — poll the Hedera Mirror Node REST API for messages
+  posted after a given timestamp; returns parsed JSON payloads.
 
 All business logic (serialisation, routing, error handling) belongs in callers.
 This module stays small and stateless.
@@ -15,13 +16,16 @@ Implementation note — why we do not use ``Client.from_env()``
 ``Client.from_env()`` resolves the operator key via ``PrivateKey.from_string()``,
 which defaults to **Ed25519** when the raw key is 32 bytes.  Hedera Portal
 accounts are **ECDSA (secp256k1)** by default.  Using the wrong key type causes
-a ``INVALID_SIGNATURE`` precheck error with no helpful message.  We therefore
+an ``INVALID_SIGNATURE`` precheck error with no helpful message.  We therefore
 build the client manually with ``PrivateKey.from_string_ecdsa()`` to remove the
 ambiguity entirely.
 """
 from __future__ import annotations
 
+import base64
+import json
 import os
+import urllib.request
 
 from dotenv import load_dotenv
 from hiero_sdk_python import (
@@ -33,6 +37,8 @@ from hiero_sdk_python import (
     TopicId,
     TopicMessageSubmitTransaction,
 )
+
+_MIRROR_NODE_BASE = "https://testnet.mirrornode.hedera.com"
 
 
 def _build_client() -> Client:
@@ -128,3 +134,53 @@ def submit_message(topic_id_str: str, message_json: str) -> str:
     if receipt.transaction_id is None:
         raise RuntimeError("HCS submit_message: receipt returned no transaction_id")
     return receipt.transaction_id.to_string()
+
+
+_MIRROR_NODE_TIMEOUT = 15   # seconds
+
+def poll_topic(topic_id_str: str, since_ts: float = 0.0) -> list[dict]:
+    """Fetch HCS messages from the Mirror Node posted after ``since_ts``.
+
+    Polls the Hedera testnet Mirror Node REST API
+    (``https://testnet.mirrornode.hedera.com``) and returns all messages on the
+    given topic whose ``consensus_timestamp`` is greater than ``since_ts``.
+
+    Each returned dict is the JSON-decoded content of one HCS message (as
+    produced by :func:`~taskforge.models.to_json`), plus a ``"_consensus_ts"``
+    key carrying the raw consensus timestamp string for ordering.
+
+    Args:
+        topic_id_str: Target topic ID in ``"shard.realm.num"`` format.
+        since_ts: Only return messages with ``consensus_timestamp > since_ts``.
+            Pass ``0.0`` to retrieve all messages on the topic.
+
+    Returns:
+        List of decoded message dicts, ordered by ``consensus_timestamp``
+        ascending.  Empty list if no messages match or if the Mirror Node
+        returns HTTP 429 (rate-limited).
+
+    Raises:
+        urllib.error.URLError: If the Mirror Node is unreachable.
+        json.JSONDecodeError: If a message body is not valid JSON.
+    """
+    # Mirror Node uses "seconds.nanos" string format for gt filter
+    since_str = f"{since_ts:.9f}"
+    url = (
+        f"{_MIRROR_NODE_BASE}/api/v1/topics/{topic_id_str}/messages"
+        f"?limit=100&order=asc&timestamp=gt:{since_str}"
+    )
+    try:
+        with urllib.request.urlopen(url, timeout=_MIRROR_NODE_TIMEOUT) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            return []   # rate-limited — caller will retry on next poll cycle
+        raise
+
+    results: list[dict] = []
+    for msg in data.get("messages", []):
+        raw = base64.b64decode(msg["message"]).decode("utf-8")
+        payload = json.loads(raw)
+        payload["_consensus_ts"] = msg["consensus_timestamp"]
+        results.append(payload)
+    return results

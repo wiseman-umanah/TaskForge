@@ -1,7 +1,7 @@
 [project]
 name = "taskforge"
 version = "0.1.0"
-description = "Add your description here"
+description = "Competitive agent task marketplace with Hedera HCS audit trail and x402 micropayment settlement"
 readme = "README.md"
 authors = [
     { name = "wiseman-umanah", email = "wisemanumanah@gmail.com" }
