@@ -10,7 +10,7 @@ anywhere else.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 
 @dataclass
@@ -74,6 +74,34 @@ class VerdictLog:
 
 
 @dataclass
+class AgentRegistration:
+    """An external agent's registration event on the coordinator.
+
+    Written to HCS when an agent successfully pays the entry fee and registers.
+    The ``entry_fee_tx`` field is the on-chain proof that the bond was paid.
+
+    Attributes:
+        agent_id: Unique identifier chosen by the agent (e.g. ``"alpha-bot"``).
+        account_id: Hedera account that will receive bounty payments.
+        claim_url: Full URL of the agent's x402 claim endpoint, e.g.
+            ``"http://agent-host:9001/claim"``.
+        entry_fee_tx: Hedera transaction ID of the entry-fee settlement, e.g.
+            ``"0.0.1234@1234567890.500"``.  Empty string for built-in agents
+            that bypass the fee.
+        registered_ts: UNIX timestamp when the registration was recorded.
+        capabilities: Optional list of task types this agent supports.
+            Defaults to ``["invoice_extraction"]``.
+    """
+
+    agent_id: str
+    account_id: str
+    claim_url: str
+    entry_fee_tx: str
+    registered_ts: float
+    capabilities: list[str] = field(default_factory=lambda: ["invoice_extraction"])
+
+
+@dataclass
 class PaymentRecord:
     """Receipt of a settled (or explicitly rejected) x402 payment.
 
@@ -93,7 +121,7 @@ class PaymentRecord:
     hcs_message_id: str
 
 
-def to_json(obj: Job | Submission | VerdictLog | PaymentRecord) -> str:
+def to_json(obj: Job | Submission | VerdictLog | PaymentRecord | AgentRegistration) -> str:
     """Serialise a TaskForge dataclass to a JSON string for HCS submission.
 
     A ``"_type"`` key is injected into the payload so downstream consumers can
