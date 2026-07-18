@@ -40,6 +40,7 @@ class AgentRegistry:
         """
         self.topic_id = topic_id
         self._agents: dict[str, AgentRegistration] = {}
+        self._wins: dict[str, int] = {}
         self._lock = Lock()
 
     # ── Write ─────────────────────────────────────────────────────────────────
@@ -113,6 +114,25 @@ class AgentRegistry:
         with self._lock:
             return self._agents.get(agent_id)
 
+    def get_by_account(self, account_id: str) -> AgentRegistration | None:
+        """Look up a registered agent by Hedera account ID.
+
+        Prevents the same Hedera wallet from registering under multiple
+        agent IDs (Sybil-resistance).
+
+        Args:
+            account_id: Hedera account ID string, e.g. ``"0.0.9999"``.
+
+        Returns:
+            :class:`~taskforge.models.AgentRegistration` if the account is
+            already registered, ``None`` otherwise.
+        """
+        with self._lock:
+            for reg in self._agents.values():
+                if reg.account_id == account_id:
+                    return reg
+            return None
+
     def list(self) -> list[AgentRegistration]:
         """Return all currently registered agents.
 
@@ -146,6 +166,4 @@ class AgentRegistry:
             agent_id: Winner agent.
         """
         with self._lock:
-            if not hasattr(self, "_wins"):
-                self._wins: dict[str, int] = {}
             self._wins[agent_id] = self._wins.get(agent_id, 0) + 1

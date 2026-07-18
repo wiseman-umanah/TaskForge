@@ -156,11 +156,11 @@ def poll_topic(topic_id_str: str, since_ts: float = 0.0) -> list[dict]:
 
     Returns:
         List of decoded message dicts, ordered by ``consensus_timestamp``
-        ascending.  Empty list if no messages match or if the Mirror Node
-        returns HTTP 429 (rate-limited).
+        ascending.  Empty list if no messages match, if the Mirror Node
+        returns HTTP 429 (rate-limited), or if any transient network error
+        occurs (connection refused, DNS failure, socket timeout).
 
     Raises:
-        urllib.error.URLError: If the Mirror Node is unreachable.
         json.JSONDecodeError: If a message body is not valid JSON.
     """
     # Mirror Node uses "seconds.nanos" string format for gt filter
@@ -176,6 +176,10 @@ def poll_topic(topic_id_str: str, since_ts: float = 0.0) -> list[dict]:
         if exc.code == 429:
             return []   # rate-limited — caller will retry on next poll cycle
         raise
+    except urllib.error.URLError:
+        # Transient network error (DNS, connection refused, socket timeout).
+        # verdict_listener will retry on the next poll cycle.
+        return []
 
     results: list[dict] = []
     for msg in data.get("messages", []):

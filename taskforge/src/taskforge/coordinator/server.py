@@ -28,6 +28,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from taskforge.broadcaster.broadcast_job import GROUND_TRUTH, INVOICE_TEXT, post_job
@@ -143,6 +144,32 @@ def create_app(topic_id: str, operator_id: str, operator_key: str) -> FastAPI:
         version="2.0.0",
     )
 
+    # ── CORS — allow browser requests from any origin (frontend on GitHub Pages,
+    #    localhost dev server, or direct file:// open).  Restrict origins in
+    #    production by replacing "*" with your GitHub Pages URL.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_headers=["*"],
+        expose_headers=["PAYMENT-REQUIRED", "PAYMENT-RESPONSE"],
+    )
+
+    # ── CORS safety-net ───────────────────────────────────────────────────────
+    # Starlette's CORSMiddleware does not inject headers on HTTPException
+    # responses raised inside route handlers (the exception handler runs inside
+    # the middleware's own scope but bypasses the header-injection path).  This
+    # raw middleware runs *outside* CORSMiddleware and unconditionally stamps
+    # Access-Control-Allow-Origin on every response, including 402/404/422/500.
+    @app.middleware("http")
+    async def _cors_catchall(request: Request, call_next):  # type: ignore[no-untyped-def]
+        response = await call_next(request)
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Expose-Headers"] = (
+            "PAYMENT-REQUIRED, PAYMENT-RESPONSE"
+        )
+        return response
+
     # ── Routes ────────────────────────────────────────────────────────────────
 
     @app.get("/health")
@@ -176,6 +203,28 @@ def create_app(topic_id: str, operator_id: str, operator_key: str) -> FastAPI:
         proof of legitimate participation.
         """
         assert _state is not None
+
+        # ── Duplicate checks (after payment so they can't be used to probe
+        #    the registry for free — the fee is charged first) ──────────────
+        if _state.registry.get(body.agent_id):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Agent ID '{body.agent_id}' is already registered. "
+                    "Choose a different ID."
+                ),
+            )
+        existing_acct = _state.registry.get_by_account(body.account_id)
+        if existing_acct:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Hedera account '{body.account_id}' is already registered "
+                    f"under agent ID '{existing_acct.agent_id}'. "
+                    "One account per agent."
+                ),
+            )
+
         reg = AgentRegistration(
             agent_id=body.agent_id,
             account_id=body.account_id,

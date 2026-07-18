@@ -28,6 +28,7 @@ from x402.http.x402_http_client import x402HTTPClientSync
 from x402.http.constants import PAYMENT_RESPONSE_HEADER
 from x402.http.utils import decode_payment_response_header
 
+from taskforge.broadcaster.broadcast_job import GROUND_TRUTH, INVOICE_TEXT, post_job
 from taskforge.hedera_x402 import ExactHederaSchemeClient
 from taskforge.ledger.hcs_client import submit_message
 from taskforge.models import PaymentRecord, to_json
@@ -105,7 +106,11 @@ class Scheduler:
             self._stop_event.wait(timeout=_POLL_INTERVAL)
 
     def _tick(self) -> None:
-        """Check all open jobs; fire scoring for any that have expired."""
+        """Check all open jobs; fire scoring for any that have expired.
+
+        Also generates a new task automatically if all jobs are settled so the
+        marketplace is never empty.
+        """
         now = time.time()
         expired = [
             jid
@@ -114,6 +119,15 @@ class Scheduler:
         ]
         for job_id in expired:
             self._settle_job(job_id)
+
+        # If nothing is open any more, generate a fresh task so the board
+        # stays live without human intervention.
+        open_jobs = [
+            jid for jid in self.state.jobs
+            if jid not in self.state.settled_jobs
+        ]
+        if not open_jobs:
+            self._generate_task()
 
     # ── Settlement ────────────────────────────────────────────────────────────
 
@@ -273,6 +287,30 @@ class Scheduler:
             hcs_message_id="",
         )
         submit_message(self.topic_id, to_json(payment))
+
+
+    def _generate_task(self) -> None:
+        """Create a new invoice-extraction job and register it in shared state.
+
+        Called automatically by :meth:`_tick` whenever there are no open jobs.
+        Errors are caught and logged so a transient HCS failure never kills
+        the scheduler thread.
+        """
+        try:
+            job, hcs_tx = post_job(self.topic_id)
+            with self.state._lock:
+                self.state.jobs[job.job_id] = job
+                self.state.task_specs[job.job_id] = {
+                    "ground_truth": GROUND_TRUTH,
+                    "invoice_text": INVOICE_TEXT,
+                }
+                self.state.submissions[job.job_id] = []
+            print(
+                f"  [scheduler] auto-generated job {job.job_id}  "
+                f"HCS: {hcs_tx}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"  [scheduler] failed to auto-generate task: {exc}")
 
 
 # ── Module-level helpers ───────────────────────────────────────────────────────

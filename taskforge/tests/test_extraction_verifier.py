@@ -107,7 +107,7 @@ class TestGroundTruthScore:
     ) -> float:
         """Run verify with a fixed LLM score so we isolate GT behaviour."""
         v = _verifier()
-        with patch.object(v, "_llm_judge_score", return_value=llm_score):
+        with patch.object(v, "_llm_judge_score", return_value=(llm_score, None)):
             return v.verify(_task_spec(), _make_submission(payload)).score
 
     def _perfect_payload(self) -> dict:
@@ -172,9 +172,9 @@ class TestGroundTruthScore:
         v_strict = ExtractionVerifier(pass_threshold=0.9)
         v_lenient = ExtractionVerifier(pass_threshold=0.5)
 
-        with patch.object(v_strict, "_llm_judge_score", return_value=1.0):
+        with patch.object(v_strict, "_llm_judge_score", return_value=(1.0, None)):
             result_strict = v_strict.verify(_task_spec(), _make_submission(payload))
-        with patch.object(v_lenient, "_llm_judge_score", return_value=1.0):
+        with patch.object(v_lenient, "_llm_judge_score", return_value=(1.0, None)):
             result_lenient = v_lenient.verify(_task_spec(), _make_submission(payload))
 
         assert result_strict.passed is False   # GT=0.8 < threshold 0.9
@@ -201,7 +201,7 @@ class TestWeighting:
             "line_items": [{"description": "x", "quantity": 1, "unit_price": 1.0}],
         }
         v = _verifier()
-        with patch.object(v, "_llm_judge_score", return_value=0.0):
+        with patch.object(v, "_llm_judge_score", return_value=(0.0, None)):
             result = v.verify(_task_spec(), _make_submission(payload))
         # GT=1.0, LLM=0.0 → 0.7*1.0 + 0.3*0.0 = 0.7
         assert result.score == pytest.approx(0.7)
