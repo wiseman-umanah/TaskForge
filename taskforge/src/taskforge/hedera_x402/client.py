@@ -36,6 +36,44 @@ SCHEME = "exact"
 HBAR_ASSET = "0.0.0"
 
 
+def _load_private_key(key_hex: str) -> PrivateKey:
+    """Load a Hedera private key, auto-detecting ECDSA vs ED25519.
+
+    Tries ECDSA (secp256k1) first — the default for Hedera Portal accounts.
+    Falls back to ED25519 if ECDSA parsing fails, so agents with either key
+    type work without any extra configuration.
+
+    Args:
+        key_hex: Raw hex private key string (with or without ``0x`` prefix),
+            or a DER-encoded hex string.
+
+    Returns:
+        A :class:`~hiero_sdk_python.PrivateKey` ready for signing.
+
+    Raises:
+        ValueError: If the key cannot be parsed as either key type.
+    """
+    try:
+        return PrivateKey.from_string_ecdsa(key_hex)
+    except Exception:
+        pass
+    try:
+        return PrivateKey.from_string_ed25519(key_hex)
+    except Exception:
+        pass
+    try:
+        # DER-encoded keys (prefix 302e0201 for ED25519, 3041020100... for ECDSA)
+        # from_string() handles DER format automatically
+        return PrivateKey.from_string(key_hex)
+    except Exception:
+        pass
+    raise ValueError(
+        f"Could not parse private key as ECDSA, ED25519, or DER-encoded. "
+        f"Ensure the key is a valid hex string from your Hedera account. "
+        f"Key prefix: {key_hex[:8]}…"
+    )
+
+
 class ExactHederaSchemeClient:
     """Client-side Hedera exact scheme for x402 V2.
 
@@ -51,14 +89,17 @@ class ExactHederaSchemeClient:
     def __init__(self, operator_id: str, operator_key_hex: str) -> None:
         """Create an ``ExactHederaSchemeClient``.
 
+        Accepts both ECDSA (secp256k1) and ED25519 private keys — the key type
+        is detected automatically.  Hedera Portal accounts are ECDSA by default;
+        older or tool-created accounts may be ED25519.
+
         Args:
             operator_id: Broadcaster Hedera account ID, e.g. ``"0.0.1234"``.
-            operator_key_hex: ECDSA private key as raw hex (no ``0x`` prefix).
-                Must match the account's key type — Hedera Portal accounts are
-                ECDSA by default.
+            operator_key_hex: Private key as raw hex (with or without ``0x``
+                prefix).  The key type is auto-detected — no extra config needed.
         """
         self._operator_id = AccountId.from_string(operator_id)
-        self._operator_key = PrivateKey.from_string_ecdsa(operator_key_hex)
+        self._operator_key = _load_private_key(operator_key_hex)
 
     def _build_client(self) -> Client:
         """Build and return a signed testnet :class:`~hiero_sdk_python.Client`.

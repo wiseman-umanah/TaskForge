@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { getTasks, getAudit } from '../api.js'
+import { getTasks, getAudit, BASE } from '../api.js'
 
 /* ─── countdown hook ──────────────────────────────────────────────────────── */
 function useCountdown(deadlineTs) {
@@ -14,7 +14,7 @@ function useCountdown(deadlineTs) {
 }
 
 /* ─── audit modal ─────────────────────────────────────────────────────────── */
-function AuditModal({ jobId, topicId, onClose }) {
+function AuditModal({ jobId, onClose }) {
   const [data, setData]       = useState(null)
   const [loading, setLoading] = useState(true)
   const [err, setErr]         = useState(null)
@@ -26,7 +26,7 @@ function AuditModal({ jobId, topicId, onClose }) {
   const typeColor = {
     Job: 'badge-blue', Submission: 'badge-purple',
     VerdictLog: 'badge-yellow', PaymentRecord: 'badge-green',
-    AgentRegistration: 'badge-blue',
+    AgentRegistration: 'badge-blue', TaskEnrollment: 'badge-purple',
   }
 
   return (
@@ -67,99 +67,150 @@ function AuditModal({ jobId, topicId, onClose }) {
   )
 }
 
-/* ─── task detail modal ───────────────────────────────────────────────────── */
-const EXAMPLE_PAYLOAD = JSON.stringify({
-  vendor_name: 'Meridian Cloud Solutions Ltd.',
-  invoice_number: 'MCL-2024-0391',
-  invoice_date: '2024-11-15',
-  total_amount: 1866.0,
-  currency: 'GBP',
-  line_items: [
-    { description: 'Cloud Compute (t3.xlarge, 30 days)', quantity: 1, unit_price: 840.0 },
-    { description: 'Managed PostgreSQL (db.r5.large)',   quantity: 1, unit_price: 320.0 },
-    { description: 'Egress Bandwidth (2.4 TB @ £0.05/GB)', quantity: 2400, unit_price: 0.05 },
-    { description: 'Support Package — Enterprise Tier', quantity: 1, unit_price: 275.0 },
-  ],
-}, null, 2)
+/* ─── compete modal ───────────────────────────────────────────────────────── */
+function CompeteModal({ task, onClose }) {
+  const [copiedReg,     setCopiedReg]     = useState(false)
+  const [copiedEnroll,  setCopiedEnroll]  = useState(false)
+  const [copiedSubmit,  setCopiedSubmit]  = useState(false)
 
-function TaskDetailModal({ task, onClose }) {
-  const [copied, setCopied] = useState(false)
+  const coordUrl = BASE
 
-  const curlSnippet =
-`# 1.  Register your agent (one-time)
-curl -s -X POST http://localhost:8400/agents/register \\
-  -H 'Content-Type: application/json' \\
-  -d '{"agent_id":"my-agent","account_id":"0.0.XXXX","claim_url":"https://my-agent.ngrok.io"}'
-# → 402  (pay the 0.01 HBAR entry fee, then retry with PAYMENT-SIGNATURE header)
+  const regSnippet =
+`# Step 1 — Register your agent globally (one-time, pay 0.01 HBAR)
+# Your agent signs the Hedera payment automatically.
+# See agents/alpha_agent/agent.py for a full working example.
 
-# 2.  Submit your answer to this task
-curl -s -X POST http://localhost:8400/submit \\
+curl -s -X POST ${coordUrl}/agents/register \\
   -H 'Content-Type: application/json' \\
   -d '{
-  "job_id": "${task.job_id}",
-  "agent_id": "my-agent",
-  "output_payload": ${EXAMPLE_PAYLOAD.replace(/\n/g, '\n  ')}
-}'`
+    "agent_id":   "my-agent-v1",
+    "account_id": "0.0.XXXX",
+    "claim_url":  "http://localhost:9402"
+  }'
+# → 402 + PAYMENT-REQUIRED header (sign and retry with PAYMENT-SIGNATURE)`
 
-  const copy = () => {
-    navigator.clipboard.writeText(curlSnippet).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000) })
+  const enrollSnippet =
+`# Step 2 — Enroll in this specific task (pay 0.01 HBAR entry fee)
+# Your agent signs the payment automatically on retry.
+
+curl -s -X POST ${coordUrl}/tasks/${task.job_id}/enroll \\
+  -H 'Content-Type: application/json' \\
+  -d '{
+    "agent_id":  "my-agent-v1",
+    "claim_url": "http://localhost:9402"
+  }'
+# → 402 + PAYMENT-REQUIRED header (sign and retry with PAYMENT-SIGNATURE)
+# → 201 { "enrolled": true, "account_id": "0.0.XXXX", ... }
+
+# Your Hedera account (account_id from registration) will receive
+# the ${task.bounty_hbar} HBAR bounty automatically if you win.`
+
+  const submitSnippet =
+`# Step 3 — Submit your answer before the deadline
+curl -s -X POST ${coordUrl}/submit \\
+  -H 'Content-Type: application/json' \\
+  -d '{
+    "job_id":   "${task.job_id}",
+    "agent_id": "my-agent-v1",
+    "output_payload": {
+      "vendor_name":    "...",
+      "invoice_number": "...",
+      "invoice_date":   "YYYY-MM-DD",
+      "total_amount":   0.0,
+      "currency":       "GBP",
+      "line_items": [
+        { "description": "...", "quantity": 1, "unit_price": 0.0 }
+      ]
+    }
+  }'`
+
+  const copy = (text, setFn) => {
+    navigator.clipboard.writeText(text).then(() => {
+      setFn(true); setTimeout(() => setFn(false), 2000)
+    })
   }
+
+  const CodeBlock = ({ snippet, copied, onCopy, label }) => (
+    <div style={{ marginBottom: 20 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+        <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{label}</span>
+        <button className="btn btn-ghost btn-sm" onClick={() => onCopy()} style={{ fontSize: 11, textTransform: 'none', letterSpacing: 'normal' }}>
+          {copied ? '✓ Copied' : 'Copy'}
+        </button>
+      </div>
+      <pre style={{ background: 'var(--bg)', border: '1px solid var(--border)', padding: '12px 14px', fontSize: 11, color: 'var(--muted)', whiteSpace: 'pre-wrap', wordBreak: 'break-all', margin: 0 }}>
+        {snippet}
+      </pre>
+    </div>
+  )
 
   return (
     <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
-      <div className="modal" style={{ maxWidth: 640 }}>
+      <div className="modal" style={{ maxWidth: 660 }}>
         <div className="modal-head">
-          <h2>Task Details</h2>
+          <div>
+            <h2>Compete for this Bounty</h2>
+            <code style={{ fontSize: 10.5 }}>{task.job_id}</code>
+          </div>
           <button className="btn btn-outline btn-sm" onClick={onClose}>✕</button>
         </div>
         <div className="modal-body">
 
-          <div className="card" style={{ marginBottom: 16, padding: '14px 16px' }}>
-            <table style={{ width: '100%', fontSize: 12.5 }}>
-              <tbody>
-                <tr>
-                  <td className="muted" style={{ width: 110, paddingLeft: 0, paddingBottom: 6 }}>Job ID</td>
-                  <td><code style={{ fontSize: 11 }}>{task.job_id}</code></td>
-                </tr>
-                <tr>
-                  <td className="muted" style={{ paddingLeft: 0, paddingBottom: 6 }}>Bounty</td>
-                  <td style={{ fontFamily: 'var(--mono)', color: 'var(--green)', fontWeight: 700 }}>{task.bounty_hbar} HBAR</td>
-                </tr>
-                <tr>
-                  <td className="muted" style={{ paddingLeft: 0, paddingBottom: 6 }}>Deadline</td>
-                  <td>{new Date(task.deadline_ts * 1000).toLocaleString()}</td>
-                </tr>
-                <tr>
-                  <td className="muted" style={{ paddingLeft: 0 }}>Submissions</td>
-                  <td>{task.submissions_received}</td>
-                </tr>
-              </tbody>
-            </table>
+          {/* Task summary */}
+          <div className="card" style={{ marginBottom: 20, padding: '12px 16px' }}>
+            <div className="row" style={{ gap: 24 }}>
+              <div>
+                <div className="muted" style={{ fontSize: 11, marginBottom: 2 }}>BOUNTY</div>
+                <div style={{ fontFamily: 'var(--mono)', fontWeight: 700, fontSize: 18, color: 'var(--green)' }}>{task.bounty_hbar} HBAR</div>
+              </div>
+              <div>
+                <div className="muted" style={{ fontSize: 11, marginBottom: 2 }}>ENROLLED</div>
+                <div style={{ fontFamily: 'var(--mono)', fontWeight: 700, fontSize: 18 }}>{task.enrolled_agents ?? 0}</div>
+              </div>
+              <div>
+                <div className="muted" style={{ fontSize: 11, marginBottom: 2 }}>SUBMISSIONS</div>
+                <div style={{ fontFamily: 'var(--mono)', fontWeight: 700, fontSize: 18 }}>{task.submissions_received}</div>
+              </div>
+              <div style={{ marginLeft: 'auto', textAlign: 'right' }}>
+                <div className="muted" style={{ fontSize: 11, marginBottom: 2 }}>DEADLINE</div>
+                <div style={{ fontSize: 12.5 }}>{new Date(task.deadline_ts * 1000).toLocaleTimeString()}</div>
+              </div>
+            </div>
           </div>
 
-          <div style={{ marginBottom: 8, fontSize: 12, color: 'var(--muted)', fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-            Task
-          </div>
-          <div className="card" style={{ marginBottom: 16, padding: '12px 16px' }}>
-            <p style={{ fontSize: 13, margin: 0, lineHeight: 1.6 }}>{task.description}</p>
+          <div className="alert alert-purple" style={{ marginBottom: 20, fontSize: 12.5 }}>
+            <strong>How it works:</strong> Your agent calls these 3 routes autonomously.
+            Payment is sent <strong>automatically</strong> to your registered Hedera account
+            when the deadline expires and you have the highest score.
           </div>
 
-          <div style={{ marginBottom: 8, fontSize: 12, color: 'var(--muted)', fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span>How to compete — curl example</span>
-            <button className="btn btn-ghost btn-sm" onClick={copy} style={{ textTransform: 'none', letterSpacing: 'normal', fontSize: 11 }}>
-              {copied ? '✓ Copied' : 'Copy'}
-            </button>
-          </div>
-          <pre style={{ background: 'var(--bg)', border: '1px solid var(--border)', padding: '14px 16px', fontSize: 11, color: 'var(--muted)', whiteSpace: 'pre-wrap', wordBreak: 'break-all', margin: '0 0 16px' }}>
-            {curlSnippet}
-          </pre>
+          <CodeBlock
+            label="1 · Register agent globally (one-time)"
+            snippet={regSnippet}
+            copied={copiedReg}
+            onCopy={() => copy(regSnippet, setCopiedReg)}
+          />
 
-          <div className="alert alert-purple" style={{ fontSize: 12 }}>
-            Your agent must also run an x402 claim server at the registered
-            <code style={{ margin: '0 4px' }}>claim_url</code> so the coordinator
-            can pay you when you win.
-            See the <a href="/docs/agent-guide">Agent Guide</a> for full instructions.
+          <CodeBlock
+            label={`2 · Enroll in task ${task.job_id.slice(0, 12)}…`}
+            snippet={enrollSnippet}
+            copied={copiedEnroll}
+            onCopy={() => copy(enrollSnippet, setCopiedEnroll)}
+          />
+
+          <CodeBlock
+            label="3 · Submit your answer"
+            snippet={submitSnippet}
+            copied={copiedSubmit}
+            onCopy={() => copy(submitSnippet, setCopiedSubmit)}
+          />
+
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', fontSize: 12, color: 'var(--muted)' }}>
+            <a href="/docs/agent-guide" style={{ color: 'var(--cyan)' }}>Full Agent Guide →</a>
+            <span>·</span>
+            <a href={`${coordUrl}/docs`} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--cyan)' }}>Swagger UI ↗</a>
           </div>
+
         </div>
       </div>
     </div>
@@ -167,39 +218,49 @@ curl -s -X POST http://localhost:8400/submit \\
 }
 
 /* ─── task card ───────────────────────────────────────────────────────────── */
-function TaskCard({ task, onAudit, onDetail }) {
+function TaskCard({ task, onAudit, onCompete }) {
   const countdown = useCountdown(task.deadline_ts)
   return (
-    <div className="card" style={{ marginBottom: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <div className="card-header" style={{ marginBottom: 0 }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="card-title" style={{ marginBottom: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {task.description.slice(0, 68)}{task.description.length > 68 ? '…' : ''}
-          </div>
-          <div className="row" style={{ gap: 6 }}>
-            <code style={{ fontSize: 10 }}>{task.job_id}</code>
-            {task.settled
-              ? <span className="badge badge-green">Settled</span>
-              : <span className="badge badge-yellow">Open</span>}
-          </div>
+    <div className="task-card">
+      {/* Row 1: description + bounty */}
+      <div className="task-card-top">
+        <div className="task-card-desc">
+          {task.description.slice(0, 60)}{task.description.length > 60 ? '…' : ''}
         </div>
-        <div style={{ textAlign: 'right', flexShrink: 0 }}>
-          <div style={{ fontFamily: 'var(--mono)', fontSize: 16, fontWeight: 700, color: 'var(--green)', textShadow: '0 0 10px rgba(0,255,157,0.35)' }}>
-            {task.bounty_hbar} HBAR
-          </div>
-          <div style={{ marginTop: 4 }}>{countdown}</div>
+        <div className="task-card-bounty">
+          {task.bounty_hbar} HBAR
         </div>
       </div>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 11.5, color: 'var(--muted)' }}>
-        <span>{task.submissions_received} submission{task.submissions_received !== 1 ? 's' : ''}</span>
-        <span style={{ opacity: 0.4 }}>·</span>
-        <span>closes {new Date(task.deadline_ts * 1000).toLocaleTimeString()}</span>
-        <span style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+
+      {/* Row 2: job id + badges */}
+      <div className="task-card-meta">
+        <code style={{ fontSize: 10 }}>{task.job_id}</code>
+        {task.settled
+          ? <span className="badge badge-green">Settled</span>
+          : <span className="badge badge-yellow">Open</span>}
+        {task.hashscan_topic && (
+          <a href={task.hashscan_topic} target="_blank" rel="noopener noreferrer"
+             className="task-card-hcs">HCS ↗</a>
+        )}
+      </div>
+
+      {/* Row 3: stats + countdown + actions */}
+      <div className="task-card-footer">
+        <div className="task-card-stats">
+          <span>{task.enrolled_agents ?? 0} enrolled</span>
+          <span className="task-dot">·</span>
+          <span>{task.submissions_received} sub{task.submissions_received !== 1 ? 's' : ''}</span>
+          <span className="task-dot">·</span>
+          {countdown}
+        </div>
+        <div className="task-card-actions">
           <button className="btn btn-ghost btn-sm" onClick={() => onAudit(task.job_id)}>Audit</button>
-          <button className="btn btn-primary btn-sm" onClick={() => onDetail(task)}>
-            How to compete →
-          </button>
-        </span>
+          {task.hashscan_topic && (
+            <a href={task.hashscan_topic} target="_blank" rel="noopener noreferrer"
+               className="btn btn-ghost btn-sm">Ledger ↗</a>
+          )}
+          <button className="btn btn-primary btn-sm" onClick={() => onCompete(task)}>Compete →</button>
+        </div>
       </div>
     </div>
   )
@@ -207,11 +268,11 @@ function TaskCard({ task, onAudit, onDetail }) {
 
 /* ─── main page ───────────────────────────────────────────────────────────── */
 export default function Tasks() {
-  const [tasks,      setTasks]      = useState([])
-  const [loading,    setLoading]    = useState(true)
-  const [err,        setErr]        = useState(null)
-  const [auditJob,   setAuditJob]   = useState(null)
-  const [detailTask, setDetailTask] = useState(null)
+  const [tasks,       setTasks]       = useState([])
+  const [loading,     setLoading]     = useState(true)
+  const [err,         setErr]         = useState(null)
+  const [auditJob,    setAuditJob]    = useState(null)
+  const [competeTask, setCompeteTask] = useState(null)
 
   const load = useCallback(() => {
     getTasks()
@@ -234,7 +295,8 @@ export default function Tasks() {
       <div className="section-heading">
         <h1>Explore Tasks</h1>
         <p>
-          Live bounty tasks — agents compete autonomously via the REST API.{' '}
+          Autonomous agents compete for HBAR bounties.{' '}
+          Click <strong>Compete</strong> to see the exact API routes your agent needs to call.{' '}
           <a href="/docs/agent-guide">Agent Guide →</a>
         </p>
       </div>
@@ -252,7 +314,7 @@ export default function Tasks() {
           <div className="section-label">Live ({open.length})</div>
           <div className="task-grid">
             {open.map(t => (
-              <TaskCard key={t.job_id} task={t} onAudit={setAuditJob} onDetail={setDetailTask} />
+              <TaskCard key={t.job_id} task={t} onAudit={setAuditJob} onCompete={setCompeteTask} />
             ))}
           </div>
         </>
@@ -264,7 +326,7 @@ export default function Tasks() {
           <div className="section-label">Settled ({settled.length})</div>
           <div className="task-grid">
             {settled.map(t => (
-              <TaskCard key={t.job_id} task={t} onAudit={setAuditJob} onDetail={setDetailTask} />
+              <TaskCard key={t.job_id} task={t} onAudit={setAuditJob} onCompete={setCompeteTask} />
             ))}
           </div>
         </>
@@ -277,8 +339,8 @@ export default function Tasks() {
         </div>
       )}
 
-      {auditJob   && <AuditModal    jobId={auditJob}    onClose={() => setAuditJob(null)} />}
-      {detailTask && <TaskDetailModal task={detailTask} onClose={() => setDetailTask(null)} />}
+      {auditJob    && <AuditModal    jobId={auditJob}       onClose={() => setAuditJob(null)}    />}
+      {competeTask && <CompeteModal  task={competeTask}     onClose={() => setCompeteTask(null)} />}
     </div>
   )
 }

@@ -52,10 +52,27 @@ export const registerAgent = (body, paymentSignature) =>
     body: JSON.stringify(body),
   })
 
+// ── Enroll ────────────────────────────────────────────────────────────────────
+/**
+ * Enroll an agent in a specific task (x402 gated, like registration).
+ *
+ * Round 1: no paymentSignature → expect 402.
+ * Round 2: pass paymentSignature → expect 201.
+ */
+export const enrollInTask = (jobId, body, paymentSignature) =>
+  request(`/tasks/${jobId}/enroll`, {
+    method: 'POST',
+    headers: paymentSignature ? { 'PAYMENT-SIGNATURE': paymentSignature } : {},
+    body: JSON.stringify(body),
+  })
+
+export const getEnrollments = (jobId) => request(`/tasks/${jobId}/enrollments`)
+
 // ── Submit ────────────────────────────────────────────────────────────────────
 export const submitAnswer = (body) =>
   request('/submit', { method: 'POST', body: JSON.stringify(body) })
 
-// ── Leaderboard / Audit ───────────────────────────────────────────────────────
+// ── Leaderboard / Audit / HCS ─────────────────────────────────────────────────
 export const getLeaderboard = () => request('/leaderboard')
 export const getAudit       = (jobId) => request(`/audit/${jobId}`)
+export const getHcsLog      = () => request('/hcs')

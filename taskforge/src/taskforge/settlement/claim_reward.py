@@ -131,7 +131,7 @@ class ClaimServer:
         target_path = f"/claim/{job_id}"
 
         class _Handler(BaseHTTPRequestHandler):
-            def log_message(self, fmt: str, *args: Any) -> None:  # noqa: ARG002
+            def log_message(self, format: str, *args: Any) -> None:  # noqa: ARG002
                 """Suppress default access log — demo output is cleaner without it."""
 
             def do_GET(self) -> None:  # noqa: N802

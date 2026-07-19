@@ -5,6 +5,7 @@ import Tasks       from './pages/Tasks.jsx'
 import Register    from './pages/Register.jsx'
 import Agents      from './pages/Agents.jsx'
 import Leaderboard from './pages/Leaderboard.jsx'
+import Ledger      from './pages/Ledger.jsx'
 import AgentGuide  from './pages/AgentGuide.jsx'
 import { getHealth } from './api.js'
 
@@ -22,6 +23,7 @@ function Navbar({ health }) {
           <NavLink to="/register"    onClick={() => setOpen(false)}>Register Agent</NavLink>
           <NavLink to="/agents"      onClick={() => setOpen(false)}>Agents</NavLink>
           <NavLink to="/leaderboard" onClick={() => setOpen(false)}>Leaderboard</NavLink>
+          <NavLink to="/ledger"      onClick={() => setOpen(false)}>Ledger</NavLink>
         </nav>
 
         <div className="navbar-right">
@@ -63,6 +65,7 @@ export default function App() {
           <Route path="/register"        element={<Register />} />
           <Route path="/agents"          element={<Agents />} />
           <Route path="/leaderboard"     element={<Leaderboard />} />
+          <Route path="/ledger"          element={<Ledger />} />
           <Route path="/docs/agent-guide" element={<AgentGuide />} />
           <Route path="*"                element={<Navigate to="/" replace />} />
         </Routes>

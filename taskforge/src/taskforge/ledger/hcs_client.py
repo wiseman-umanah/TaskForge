@@ -25,6 +25,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import urllib.error
 import urllib.request
 
 from dotenv import load_dotenv
@@ -41,6 +42,42 @@ from hiero_sdk_python import (
 _MIRROR_NODE_BASE = "https://testnet.mirrornode.hedera.com"
 
 
+def _load_private_key(key_hex: str) -> PrivateKey:
+    """Load a Hedera private key, auto-detecting ECDSA vs ED25519.
+
+    Tries ECDSA (secp256k1) first — the default for Hedera Portal accounts.
+    Falls back to ED25519 if ECDSA parsing fails.
+
+    Args:
+        key_hex: Raw hex private key string (with or without ``0x`` prefix).
+
+    Returns:
+        A :class:`~hiero_sdk_python.PrivateKey` ready for signing.
+
+    Raises:
+        ValueError: If the key cannot be parsed as either key type.
+    """
+    try:
+        return PrivateKey.from_string_ecdsa(key_hex)
+    except Exception:
+        pass
+    try:
+        return PrivateKey.from_string_ed25519(key_hex)
+    except Exception:
+        pass
+    try:
+        # DER-encoded keys (prefix 302e0201 for ED25519, 3041020100... for ECDSA)
+        # from_string() handles DER format automatically
+        return PrivateKey.from_string(key_hex)
+    except Exception:
+        pass
+    raise ValueError(
+        f"Could not parse private key as ECDSA, ED25519, or DER-encoded. "
+        f"Ensure the key is a valid hex string from your Hedera account. "
+        f"Key prefix: {key_hex[:8]}…"
+    )
+
+
 def _build_client() -> Client:
     """Build a Hedera testnet :class:`~hiero_sdk_python.Client` for the broadcaster.
 
@@ -48,7 +85,8 @@ def _build_client() -> Client:
     directory):
 
     - ``OPERATOR_ID``  — broadcaster account ID, e.g. ``"0.0.1234"``.
-    - ``OPERATOR_KEY`` — ECDSA private key as a raw hex string (no ``0x`` prefix).
+    - ``OPERATOR_KEY`` — Private key as raw hex.  Both ECDSA and ED25519 are
+      accepted — the key type is detected automatically.
 
     Returns:
         A fully configured :class:`~hiero_sdk_python.Client` ready to sign and
@@ -57,8 +95,7 @@ def _build_client() -> Client:
     Raises:
         KeyError: If either ``OPERATOR_ID`` or ``OPERATOR_KEY`` is absent from
             the environment.
-        ValueError: If either value cannot be parsed as a valid account ID or
-            ECDSA private key.
+        ValueError: If the key cannot be parsed as either ECDSA or ED25519.
     """
     load_dotenv()
     operator_id = os.environ["OPERATOR_ID"]
@@ -67,7 +104,7 @@ def _build_client() -> Client:
     client = Client(Network("testnet"))
     client.set_operator(
         AccountId.from_string(operator_id),
-        PrivateKey.from_string_ecdsa(operator_key),
+        _load_private_key(operator_key),
     )
     return client
 

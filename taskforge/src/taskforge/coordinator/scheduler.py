@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import time
 import threading
+import urllib.error
 import urllib.request
 from typing import TYPE_CHECKING
 
@@ -28,7 +29,8 @@ from x402.http.x402_http_client import x402HTTPClientSync
 from x402.http.constants import PAYMENT_RESPONSE_HEADER
 from x402.http.utils import decode_payment_response_header
 
-from taskforge.broadcaster.broadcast_job import GROUND_TRUTH, INVOICE_TEXT, post_job
+from taskforge.broadcaster.broadcast_job import pick_task, post_job
+from taskforge.db import PaymentRow, TaskRow, VerdictRow, get_session, using_persistent_db
 from taskforge.hedera_x402 import ExactHederaSchemeClient
 from taskforge.ledger.hcs_client import submit_message
 from taskforge.models import PaymentRecord, to_json
@@ -144,18 +146,35 @@ class Scheduler:
         task_spec = self.state.task_specs.get(job_id)
         submissions = self.state.submissions.get(job_id, [])
 
+        # Use the task's own topic; fall back to platform topic if missing
+        task_topic = self.state.job_topics.get(job_id, self.topic_id)
+
         if not job or not task_spec or not submissions:
             print(f"  [scheduler] job {job_id}: no submissions — skipping payment")
             return
 
-        print(f"\n  [scheduler] settling job {job_id} ({len(submissions)} submissions)")
+        print(
+            f"\n  [scheduler] settling job {job_id} ({len(submissions)} submissions)"
+            f"  topic={task_topic}"
+        )
 
         verifier = ExtractionVerifier()
         verdicts = []
         for sub in submissions:
             verdict = verifier.verify(task_spec, sub)
             verdicts.append((verdict, sub))
-            submit_message(self.topic_id, to_json(verdict))
+            submit_message(task_topic, to_json(verdict))
+            if using_persistent_db():
+                with get_session() as db:
+                    db.add(VerdictRow(
+                        job_id=verdict.job_id,
+                        agent_id=verdict.agent_id,
+                        score=verdict.score,
+                        passed=verdict.passed,
+                        reason=verdict.reason,
+                        ts=verdict.ts,
+                    ))
+                    db.commit()
             status = "✓" if verdict.passed else "✗"
             print(f"    {status} {sub.agent_id}: score={verdict.score:.3f}")
 
@@ -165,7 +184,7 @@ class Scheduler:
 
         if not passed:
             print(f"    No passing submissions for job {job_id} — no payment")
-            _log_no_winner(self.topic_id, job_id)
+            _log_no_winner(task_topic, job_id)
             return
 
         # Check for tie
@@ -177,28 +196,35 @@ class Scheduler:
 
         winner_verdict, winner_sub = passed[0]
         winner_agent_id = winner_verdict.agent_id
+
+        # Prefer the per-task enrollment for claim_url and account_id;
+        # fall back to the global registry entry.
+        enrollment = self.state.enrollments.get(job_id, {}).get(winner_agent_id)
         winner_reg = self.state.registry.get(winner_agent_id)
 
-        if not winner_reg:
-            print(f"    [scheduler] winner {winner_agent_id} not in registry — cannot pay")
+        if not enrollment and not winner_reg:
+            print(f"    [scheduler] winner {winner_agent_id} not in registry or enrolled — cannot pay")
             _log_no_winner(self.topic_id, job_id)
             return
+
+        claim_url   = enrollment.claim_url   if enrollment else winner_reg.claim_url    # type: ignore[union-attr]
+        account_id  = enrollment.account_id  if enrollment else winner_reg.account_id   # type: ignore[union-attr]
 
         print(f"    Winner: {winner_agent_id} — initiating x402 payment")
         self._pay_winner(
             job_id=job_id,
-            claim_url=winner_reg.claim_url,
+            claim_url=claim_url,
             winner_agent_id=winner_agent_id,
             pre_logged_acct=winner_sub.output_payload.get("_worker_account_id", ""),
-            expected_acct=winner_reg.account_id,
+            expected_acct=account_id,
         )
 
-        # Log rejections for losers
+        # Log rejections for losers — also go to the task topic
         for v, _s in passed[1:]:
-            _log_rejection(self.topic_id, job_id, v.agent_id, v.score)
+            _log_rejection(task_topic, job_id, v.agent_id, v.score)
         for v, _s in verdicts:
             if v.agent_id not in {w[0].agent_id for w in passed}:
-                _log_rejection(self.topic_id, job_id, v.agent_id, v.score)
+                _log_rejection(task_topic, job_id, v.agent_id, v.score)
 
         # Update win count
         self.state.registry.record_win(winner_agent_id)
@@ -286,28 +312,53 @@ class Scheduler:
             amount=_BOUNTY_HBAR,
             hcs_message_id="",
         )
-        submit_message(self.topic_id, to_json(payment))
+        # Payment record goes to the task topic — it belongs to this competition
+        task_topic = self.state.job_topics.get(job_id, self.topic_id)
+        submit_message(task_topic, to_json(payment))
+        if using_persistent_db():
+            with get_session() as db:
+                db.add(PaymentRow(
+                    job_id=job_id,
+                    winner_agent_id=winner_agent_id,
+                    tx_hash=tx_id,
+                    amount_hbar=_BOUNTY_HBAR,
+                    recorded_ts=time.time(),
+                ))
+                task_row = db.get(TaskRow, job_id)
+                if task_row:
+                    task_row.settled = True
+                db.commit()
 
 
     def _generate_task(self) -> None:
-        """Create a new invoice-extraction job and register it in shared state.
+        """Create a new invoice-extraction job with its own HCS topic.
 
         Called automatically by :meth:`_tick` whenever there are no open jobs.
+        Each task gets a fresh HCS topic so its entire lifecycle is self-contained
+        and independently auditable on HashScan.
         Errors are caught and logged so a transient HCS failure never kills
         the scheduler thread.
         """
         try:
-            job, hcs_tx = post_job(self.topic_id)
+            from taskforge.ledger.hcs_client import create_topic
+            task = pick_task()
+            task_topic_id = create_topic(memo="taskforge-task")
+            job, hcs_tx = post_job(task_topic_id, task=task)
             with self.state._lock:
+                self.state.job_topics[job.job_id] = task_topic_id
                 self.state.jobs[job.job_id] = job
                 self.state.task_specs[job.job_id] = {
-                    "ground_truth": GROUND_TRUTH,
-                    "invoice_text": INVOICE_TEXT,
+                    "ground_truth": task["ground_truth"],
+                    "invoice_text": task["invoice_text"],
                 }
                 self.state.submissions[job.job_id] = []
             print(
                 f"  [scheduler] auto-generated job {job.job_id}  "
-                f"HCS: {hcs_tx}"
+                f"task-topic={task_topic_id}  HCS: {hcs_tx}"
+            )
+            print(
+                f"  [scheduler] HashScan: "
+                f"https://hashscan.io/testnet/topic/{task_topic_id}"
             )
         except Exception as exc:  # noqa: BLE001
             print(f"  [scheduler] failed to auto-generate task: {exc}")

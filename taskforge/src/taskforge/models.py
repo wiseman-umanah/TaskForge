@@ -102,6 +102,31 @@ class AgentRegistration:
 
 
 @dataclass
+class TaskEnrollment:
+    """An agent's enrollment into a specific task competition.
+
+    Written to HCS when an agent pays the per-task entry fee and enrolls.
+    An agent must be globally registered (via :class:`AgentRegistration`) before
+    it can enroll in individual tasks.
+
+    Attributes:
+        job_id: The task being enrolled in.
+        agent_id: The enrolling agent's identifier.
+        account_id: Hedera account that will receive the bounty if this agent wins.
+        claim_url: The agent's x402 claim endpoint for this task.
+        entry_fee_tx: Hedera transaction ID of the per-task entry-fee payment.
+        enrolled_ts: UNIX timestamp when the enrollment was recorded.
+    """
+
+    job_id: str
+    agent_id: str
+    account_id: str
+    claim_url: str
+    entry_fee_tx: str
+    enrolled_ts: float
+
+
+@dataclass
 class PaymentRecord:
     """Receipt of a settled (or explicitly rejected) x402 payment.
 
@@ -121,7 +146,7 @@ class PaymentRecord:
     hcs_message_id: str
 
 
-def to_json(obj: Job | Submission | VerdictLog | PaymentRecord | AgentRegistration) -> str:
+def to_json(obj: Job | Submission | VerdictLog | PaymentRecord | AgentRegistration | TaskEnrollment) -> str:
     """Serialise a TaskForge dataclass to a JSON string for HCS submission.
 
     A ``"_type"`` key is injected into the payload so downstream consumers can
