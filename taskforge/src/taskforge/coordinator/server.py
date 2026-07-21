@@ -16,7 +16,8 @@ HCS topic model
 
 Endpoints
 ---------
-GET  /health                      — liveness + platform topic ID
+GET  /status                      — liveness + platform topic ID
+GET  /health                      — alias for /status
 POST /agents/register             — pay 0.01 HBAR entry fee, register agent globally
 GET  /agents                      — list registered agents
 DELETE /agents/{agent_id}         — deregister an agent
@@ -46,7 +47,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlmodel import select
 
-from taskforge.broadcaster.broadcast_job import pick_task, post_job
+from taskforge.broadcaster.broadcast_job import GROUND_TRUTH, INVOICE_TEXT, pick_task, post_job
 from taskforge.coordinator.gate import EntryFeeGate, ENTRY_FEE_TINYBARS
 from taskforge.coordinator.registry import AgentRegistry
 from taskforge.coordinator.scheduler import Scheduler
@@ -214,8 +215,9 @@ def create_app(topic_id: str, operator_id: str, operator_key: str) -> FastAPI:
 
     # ── Routes ────────────────────────────────────────────────────────────────
 
+    @app.get("/status")
     @app.get("/health")
-    def health() -> dict:
+    def status() -> dict:
         """Return coordinator liveness and current topic ID."""
         assert _state is not None
         return {

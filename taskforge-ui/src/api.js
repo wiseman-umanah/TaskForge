@@ -23,8 +23,8 @@ async function request(path, options = {}) {
   return res.json()
 }
 
-// ── Health ────────────────────────────────────────────────────────────────────
-export const getHealth = () => request('/health')
+// ── Status ────────────────────────────────────────────────────────────────────
+export const getHealth = () => request('/status')
 
 // ── Tasks ─────────────────────────────────────────────────────────────────────
 export const getTasks = () => request('/tasks')
