@@ -42,7 +42,31 @@ load_dotenv()
 
 # ── Feature flag ──────────────────────────────────────────────────────────────
 
-_DATABASE_URL: str | None = os.getenv("DATABASE_URL") or None
+def _normalise_db_url(url: str) -> str:
+    """Rewrite a bare ``postgresql://`` URL to use the psycopg2 driver.
+
+    Render (and many other PaaS providers) export ``DATABASE_URL`` as a plain
+    ``postgresql://`` DSN.  SQLAlchemy requires an explicit driver segment
+    (``+psycopg2``) — without it the ``psycopg2`` dialect is still selected by
+    default, but only if the package is importable.  Normalising upfront gives
+    a clearer error if the driver is missing and avoids SQLAlchemy dialect
+    fallback surprises.
+
+    Args:
+        url: Raw database URL string from the environment.
+
+    Returns:
+        URL with ``postgresql+psycopg2://`` scheme when the input starts with
+        the bare ``postgresql://`` prefix; otherwise the original string.
+    """
+    if url.startswith("postgresql://") or url.startswith("postgres://"):
+        return "postgresql+psycopg2://" + url.split("://", 1)[1]
+    return url
+
+
+_DATABASE_URL: str | None = (
+    _normalise_db_url(raw) if (raw := os.getenv("DATABASE_URL")) else None
+)
 
 
 def using_persistent_db() -> bool:
