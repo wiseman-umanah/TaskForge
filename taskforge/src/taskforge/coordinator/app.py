@@ -19,10 +19,11 @@ from __future__ import annotations
 import os
 import time
 
+import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI
 
-from taskforge.broadcaster.broadcast_job import GROUND_TRUTH, INVOICE_TEXT, post_job
+from taskforge.broadcaster.broadcast_job import pick_task, post_job
 from taskforge.coordinator.server import CoordinatorState, create_app
 from taskforge.coordinator import server as _srv
 from taskforge.ledger.hcs_client import create_topic
@@ -79,11 +80,15 @@ def _bootstrap() -> FastAPI:
     # ── Step 3: Generate first task (gets its own HCS topic) ─────────────────
     print(f"\n{_B}[3/3] Generating first invoice-extraction task{_X}")
     from taskforge.ledger.hcs_client import create_topic as _ct
+    first_task = pick_task()
     task_topic_id = _ct(memo="taskforge-task")
-    job, job_hcs_tx = post_job(task_topic_id)
+    job, job_hcs_tx = post_job(task_topic_id, task=first_task)
     state.job_topics[job.job_id] = task_topic_id
     state.jobs[job.job_id] = job
-    state.task_specs[job.job_id] = {"ground_truth": GROUND_TRUTH, "invoice_text": INVOICE_TEXT}
+    state.task_specs[job.job_id] = {
+        "ground_truth": first_task["ground_truth"],
+        "invoice_text": first_task["invoice_text"],
+    }
     state.submissions[job.job_id] = []
     print(f"  {_G}✓{_X} Job ID      : {job.job_id}")
     print(f"  {_G}✓{_X} Task topic  : {task_topic_id}")
@@ -108,3 +113,15 @@ def _bootstrap() -> FastAPI:
 # Module-level app object — uvicorn finds this when you pass
 # "taskforge.coordinator.app:app" on the command line.
 app: FastAPI = _bootstrap()
+
+
+def main() -> None:
+    """CLI entry point: run the coordinator under uvicorn.
+
+    Invoked by the ``taskforge-server`` console script defined in
+    ``pyproject.toml``.  The ``app`` object is already fully initialised at
+    module-import time by :func:`_bootstrap`, so uvicorn simply needs to serve
+    it.
+    """
+    port = int(os.environ.get("PORT", "8400"))
+    uvicorn.run(app, host="0.0.0.0", port=port)
