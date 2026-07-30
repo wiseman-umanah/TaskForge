@@ -52,7 +52,7 @@ from taskforge.coordinator.gate import EntryFeeGate, ENTRY_FEE_TINYBARS
 from taskforge.coordinator.registry import AgentRegistry
 from taskforge.coordinator.scheduler import Scheduler
 from taskforge.db import (
-    AgentRow, EnrollmentRow, PaymentRow, SubmissionRow, TaskRow, VerdictRow,
+    AgentRow, EnrollmentRow, PaymentRow, PlatformRow, SubmissionRow, TaskRow, VerdictRow,
     get_session, init_db, using_persistent_db,
 )
 from taskforge.ledger.hcs_client import create_topic, poll_topic, submit_message
@@ -358,9 +358,12 @@ def create_app(topic_id: str, operator_id: str, operator_key: str) -> FastAPI:
                     job_id=job.job_id,
                     topic_id=task_topic_id,
                     description=job.description,
+                    invoice_text=task["invoice_text"],
+                    ground_truth_json=json.dumps(task["ground_truth"]),
                     bounty_hbar=job.bounty_amount,
                     deadline_ts=job.deadline_ts,
                     settled=False,
+                    settled_ts=0.0,
                 ))
                 s.commit()
 
@@ -714,18 +717,54 @@ def create_app(topic_id: str, operator_id: str, operator_key: str) -> FastAPI:
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
+def load_platform_topic_from_db() -> str | None:
+    """Return the persisted platform HCS topic ID, or ``None`` if not stored yet.
+
+    Args: none
+
+    Returns:
+        The topic ID string (e.g. ``"0.0.5678"``) if a previous run saved one,
+        or ``None`` when the DB is not configured or has no ``platform`` row yet.
+    """
+    if not using_persistent_db():
+        return None
+    with get_session() as s:
+        row = s.get(PlatformRow, 1)
+        return row.topic_id if row and row.topic_id else None
+
+
+def save_platform_topic_to_db(topic_id: str) -> None:
+    """Upsert the platform HCS topic ID into the ``platform`` singleton row.
+
+    Args:
+        topic_id: The topic ID string to persist.
+    """
+    if not using_persistent_db():
+        return
+    with get_session() as s:
+        s.merge(PlatformRow(id=1, topic_id=topic_id))
+        s.commit()
+
+
 def _load_state_from_db(state: CoordinatorState) -> None:
     """Reload persisted state into CoordinatorState on startup.
 
     Only runs when ``DATABASE_URL`` is set to a real DB (not in-memory).
-    Loads agents, tasks, enrollments, and submissions so the coordinator
-    can resume after a crash without losing all context.
+    Loads agents, tasks (with their correct invoice text and ground truth),
+    enrollments, and submissions so the coordinator resumes seamlessly after
+    a Render spin-down or any other restart.
+
+    Tasks whose deadline has already passed but were not settled (because the
+    process was down) are marked as settled immediately — the scheduler will
+    not attempt to re-score them.
 
     Args:
         state: The freshly-created :class:`CoordinatorState` to populate.
     """
     if not using_persistent_db():
         return
+
+    now = time.time()
 
     with get_session() as s:
         # Agents
@@ -741,7 +780,7 @@ def _load_state_from_db(state: CoordinatorState) -> None:
             )
             state.registry._agents[reg.agent_id] = reg
 
-        # Tasks
+        # Tasks — restore full spec from DB columns
         for row in s.exec(select(TaskRow)).all():
             job = Job(
                 job_id=row.job_id,
@@ -754,17 +793,32 @@ def _load_state_from_db(state: CoordinatorState) -> None:
             state.jobs[row.job_id] = job
             state.job_topics[row.job_id] = row.topic_id
             state.submissions.setdefault(row.job_id, [])
-            state.task_specs.setdefault(row.job_id, {
-                "ground_truth": GROUND_TRUTH,
-                "invoice_text": INVOICE_TEXT,
-            })
+
+            # Restore real ground truth and invoice text from DB
+            try:
+                ground_truth = json.loads(row.ground_truth_json) if row.ground_truth_json else {}
+            except json.JSONDecodeError:
+                ground_truth = {}
+            state.task_specs[row.job_id] = {
+                "ground_truth": ground_truth,
+                "invoice_text": row.invoice_text,
+            }
+
             if row.settled:
                 state.settled_jobs.add(row.job_id)
+            elif row.deadline_ts < now:
+                # Deadline passed while we were down — mark settled so the
+                # scheduler doesn't attempt to score a stale task.
+                state.settled_jobs.add(row.job_id)
+                row.settled = True
+                row.settled_ts = now
+                s.add(row)
+
+        s.commit()
 
         # Enrollments
         for row in s.exec(select(EnrollmentRow)).all():
-            from taskforge.models import TaskEnrollment as _TE
-            enr = _TE(
+            enr = TaskEnrollment(
                 job_id=row.job_id,
                 agent_id=row.agent_id,
                 account_id=row.account_id,
@@ -784,9 +838,10 @@ def _load_state_from_db(state: CoordinatorState) -> None:
             )
             state.submissions.setdefault(row.job_id, []).append(sub)
 
+    open_count = len(state.jobs) - len(state.settled_jobs)
     print(
         f"  [coordinator] loaded from DB: "
         f"{len(state.registry._agents)} agents, "
-        f"{len(state.jobs)} tasks, "
+        f"{len(state.jobs)} tasks ({open_count} open), "
         f"{sum(len(v) for v in state.submissions.values())} submissions"
     )

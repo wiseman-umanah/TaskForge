@@ -24,7 +24,12 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 
 from taskforge.broadcaster.broadcast_job import pick_task, post_job
-from taskforge.coordinator.server import CoordinatorState, create_app
+from taskforge.coordinator.server import (
+    CoordinatorState,
+    create_app,
+    load_platform_topic_from_db,
+    save_platform_topic_to_db,
+)
 from taskforge.coordinator import server as _srv
 from taskforge.ledger.hcs_client import create_topic
 
@@ -61,9 +66,15 @@ def _bootstrap() -> FastAPI:
     print(f"{_B}{'='*64}{_X}\n")
 
     # ── Step 1: Platform HCS topic ────────────────────────────────────────────
-    print(f"{_B}[1/3] Creating platform HCS topic (agent registrations){_X}")
-    platform_topic_id = create_topic(memo="taskforge-v2-platform")
-    print(f"  {_G}✓{_X} Platform topic : {platform_topic_id}")
+    print(f"{_B}[1/3] Platform HCS topic (agent registrations){_X}")
+    persisted_topic = load_platform_topic_from_db()
+    if persisted_topic:
+        platform_topic_id = persisted_topic
+        print(f"  {_G}✓{_X} Resumed topic  : {platform_topic_id}  (from DB)")
+    else:
+        platform_topic_id = create_topic(memo="taskforge-v2-platform")
+        save_platform_topic_to_db(platform_topic_id)
+        print(f"  {_G}✓{_X} New topic      : {platform_topic_id}")
     print(f"  {_G}✓{_X} HashScan       : {_HASHSCAN_TOPIC.format(platform_topic_id)}")
 
     # ── Step 2: Build FastAPI app ─────────────────────────────────────────────
@@ -77,24 +88,46 @@ def _bootstrap() -> FastAPI:
     print(f"  {_G}✓{_X} FastAPI app ready")
     print(f"  {_G}✓{_X} Entry fee gate: 0.01 HBAR → {operator_id}")
 
-    # ── Step 3: Generate first task (gets its own HCS topic) ─────────────────
-    print(f"\n{_B}[3/3] Generating first invoice-extraction task{_X}")
-    from taskforge.ledger.hcs_client import create_topic as _ct
-    first_task = pick_task()
-    task_topic_id = _ct(memo="taskforge-task")
-    job, job_hcs_tx = post_job(task_topic_id, task=first_task)
-    state.job_topics[job.job_id] = task_topic_id
-    state.jobs[job.job_id] = job
-    state.task_specs[job.job_id] = {
-        "ground_truth": first_task["ground_truth"],
-        "invoice_text": first_task["invoice_text"],
-    }
-    state.submissions[job.job_id] = []
-    print(f"  {_G}✓{_X} Job ID      : {job.job_id}")
-    print(f"  {_G}✓{_X} Task topic  : {task_topic_id}")
-    print(f"  {_G}✓{_X} Bounty      : {job.bounty_amount} HBAR  (deadline in 10 min)")
-    print(f"  {_G}✓{_X} HashScan TX : {_HASHSCAN_TX.format(job_hcs_tx)}")
-    print(f"  {_G}✓{_X} HashScan    : {_HASHSCAN_TOPIC.format(task_topic_id)}")
+    # ── Step 3: First task — only if no open tasks were restored from DB ──────
+    print(f"\n{_B}[3/3] Checking task queue{_X}")
+    open_jobs = [jid for jid in state.jobs if jid not in state.settled_jobs]
+    if open_jobs:
+        print(f"  {_G}✓{_X} {len(open_jobs)} open task(s) resumed from DB — no new task needed")
+        for jid in open_jobs:
+            t = state.job_topics.get(jid, "")
+            print(f"        job={jid}  topic={t}")
+    else:
+        first_task = pick_task()
+        task_topic_id = create_topic(memo="taskforge-task")
+        job, job_hcs_tx = post_job(task_topic_id, task=first_task)
+        state.job_topics[job.job_id] = task_topic_id
+        state.jobs[job.job_id] = job
+        state.task_specs[job.job_id] = {
+            "ground_truth": first_task["ground_truth"],
+            "invoice_text": first_task["invoice_text"],
+        }
+        state.submissions[job.job_id] = []
+        # Persist the new task immediately
+        from taskforge.db import TaskRow, get_session, using_persistent_db
+        import json as _json
+        if using_persistent_db():
+            with get_session() as db:
+                db.merge(TaskRow(
+                    job_id=job.job_id,
+                    topic_id=task_topic_id,
+                    description=job.description,
+                    invoice_text=first_task["invoice_text"],
+                    ground_truth_json=_json.dumps(first_task["ground_truth"]),
+                    bounty_hbar=job.bounty_amount,
+                    deadline_ts=job.deadline_ts,
+                    settled=False,
+                ))
+                db.commit()
+        print(f"  {_G}✓{_X} Job ID      : {job.job_id}")
+        print(f"  {_G}✓{_X} Task topic  : {task_topic_id}")
+        print(f"  {_G}✓{_X} Bounty      : {job.bounty_amount} HBAR  (deadline in 10 min)")
+        print(f"  {_G}✓{_X} HashScan TX : {_HASHSCAN_TX.format(job_hcs_tx)}")
+        print(f"  {_G}✓{_X} HashScan    : {_HASHSCAN_TOPIC.format(task_topic_id)}")
 
     # ── Ready ─────────────────────────────────────────────────────────────────
     print(f"\n{_B}{'='*64}{_X}")
@@ -102,7 +135,6 @@ def _bootstrap() -> FastAPI:
     print(f"  {_G}API base        :{_X} http://0.0.0.0:8400")
     print(f"  {_G}Docs            :{_X} http://0.0.0.0:8400/docs")
     print(f"  {_G}Platform topic  :{_X} {_HASHSCAN_TOPIC.format(platform_topic_id)}")
-    print(f"  {_G}Task topic      :{_X} {_HASHSCAN_TOPIC.format(task_topic_id)}")
     print(f"\n  {_D}Register agents at http://localhost:5173/register{_X}")
     print(f"  {_D}  (pays 0.01 HBAR entry fee via x402){_X}")
     print(f"{_B}{'='*64}{_X}\n")

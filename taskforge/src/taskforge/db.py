@@ -133,19 +133,25 @@ class TaskRow(SQLModel, table=True):
         job_id: Primary key — unique job identifier.
         topic_id: Per-task HCS topic ID.
         description: Task description shown to agents.
+        invoice_text: Full invoice text for this task.
+        ground_truth_json: JSON-serialised ground-truth dict for scoring.
         bounty_hbar: Bounty in HBAR.
         deadline_ts: UNIX deadline timestamp.
         settled: True once the job has been scored and paid.
+        settled_ts: UNIX timestamp when the task was settled (0.0 = not yet).
     """
 
     __tablename__: ClassVar[str] = "tasks"  # type: ignore[assignment]
 
-    job_id:      str   = Field(primary_key=True)
-    topic_id:    str   = Field(default="")
-    description: str
-    bounty_hbar: float = Field(default=0.1)
-    deadline_ts: float
-    settled:     bool  = Field(default=False)
+    job_id:             str   = Field(primary_key=True)
+    topic_id:           str   = Field(default="")
+    description:        str
+    invoice_text:       str   = Field(default="")
+    ground_truth_json:  str   = Field(default="{}")
+    bounty_hbar:        float = Field(default=0.1)
+    deadline_ts:        float
+    settled:            bool  = Field(default=False)
+    settled_ts:         float = Field(default=0.0)
 
 
 class EnrollmentRow(SQLModel, table=True):
@@ -236,6 +242,23 @@ class PaymentRow(SQLModel, table=True):
     tx_hash:         str   = Field(default="")
     amount_hbar:     float = Field(default=0.0)
     recorded_ts:     float = Field(default=0.0)
+
+
+class PlatformRow(SQLModel, table=True):
+    """Singleton row that persists the coordinator's platform HCS topic ID.
+
+    There is at most one row (``id=1``).  On restart the coordinator reads this
+    row to reuse the existing topic rather than creating a fresh one.
+
+    Attributes:
+        id: Fixed surrogate key — always ``1``.
+        topic_id: Platform HCS topic ID string, e.g. ``"0.0.5678"``.
+    """
+
+    __tablename__: ClassVar[str] = "platform"  # type: ignore[assignment]
+
+    id:       int = Field(default=1, primary_key=True)
+    topic_id: str = Field(default="")
 
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────

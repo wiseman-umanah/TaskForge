@@ -24,13 +24,18 @@ import urllib.error
 import urllib.request
 from typing import TYPE_CHECKING
 
+from sqlmodel import select as _select
+
 from x402 import x402ClientSync
 from x402.http.x402_http_client import x402HTTPClientSync
 from x402.http.constants import PAYMENT_RESPONSE_HEADER
 from x402.http.utils import decode_payment_response_header
 
 from taskforge.broadcaster.broadcast_job import pick_task, post_job
-from taskforge.db import PaymentRow, TaskRow, VerdictRow, get_session, using_persistent_db
+from taskforge.db import (
+    EnrollmentRow, PaymentRow, SubmissionRow, TaskRow, VerdictRow,
+    get_session, using_persistent_db,
+)
 from taskforge.hedera_x402 import ExactHederaSchemeClient
 from taskforge.ledger.hcs_client import submit_message
 from taskforge.models import PaymentRecord, to_json
@@ -39,9 +44,10 @@ from taskforge.verifier.extraction_verifier import ExtractionVerifier
 if TYPE_CHECKING:
     from taskforge.coordinator.server import CoordinatorState
 
-_POLL_INTERVAL = 10.0   # seconds between deadline checks
-_HTTP_TIMEOUT = 20      # seconds for x402 HTTP round-trip
+_POLL_INTERVAL = 10.0        # seconds between deadline checks
+_HTTP_TIMEOUT = 20           # seconds for x402 HTTP round-trip
 _BOUNTY_HBAR = 0.1
+_CLEANUP_AGE_SECONDS = 86_400   # 24 hours — settled tasks older than this are purged
 
 
 class Scheduler:
@@ -80,6 +86,10 @@ class Scheduler:
         self.operator_key = operator_key
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        # In-memory settled_ts registry — populated from DB on init (when
+        # available) and updated whenever a task is settled at runtime.
+        self._settled_ts: dict[str, float] = {}
+        self._load_settled_ts()
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -96,6 +106,27 @@ class Scheduler:
         if self._thread:
             self._thread.join(timeout=15)
 
+    def _load_settled_ts(self) -> None:
+        """Populate ``_settled_ts`` from the DB on startup.
+
+        Reads ``settled_ts`` from every ``TaskRow`` that is already settled so
+        the 24-hour cleanup sweep has accurate timestamps from the moment the
+        scheduler first wakes up after a restart.
+        """
+        if not using_persistent_db():
+            return
+        try:
+            with get_session() as db:
+                rows = db.exec(
+                    _select(TaskRow)
+                    .where(TaskRow.settled == True)  # noqa: E712
+                ).all()
+                for row in rows:
+                    if row.settled_ts > 0:
+                        self._settled_ts[row.job_id] = row.settled_ts
+        except Exception as exc:  # noqa: BLE001
+            print(f"  [scheduler] _load_settled_ts error: {exc}")
+
     # ── Main loop ─────────────────────────────────────────────────────────────
 
     def _loop(self) -> None:
@@ -111,7 +142,7 @@ class Scheduler:
         """Check all open jobs; fire scoring for any that have expired.
 
         Also generates a new task automatically if all jobs are settled so the
-        marketplace is never empty.
+        marketplace is never empty, and runs the 24-hour cleanup sweep.
         """
         now = time.time()
         expired = [
@@ -131,6 +162,9 @@ class Scheduler:
         if not open_jobs:
             self._generate_task()
 
+        # Purge settled tasks that are older than 24 hours.
+        self._cleanup_old_tasks()
+
     # ── Settlement ────────────────────────────────────────────────────────────
 
     def _settle_job(self, job_id: str) -> None:
@@ -139,8 +173,10 @@ class Scheduler:
         Args:
             job_id: Job to settle.
         """
-        # Mark as settled immediately so concurrent ticks don't double-fire
+        # Mark as settled immediately so concurrent ticks don't double-fire.
+        # Record settled_ts now so _cleanup_old_tasks can age it correctly.
         self.state.settled_jobs.add(job_id)
+        self._settled_ts[job_id] = time.time()
 
         job = self.state.jobs.get(job_id)
         task_spec = self.state.task_specs.get(job_id)
@@ -327,8 +363,66 @@ class Scheduler:
                 task_row = db.get(TaskRow, job_id)
                 if task_row:
                     task_row.settled = True
+                    task_row.settled_ts = time.time()
                 db.commit()
 
+
+    def _cleanup_old_tasks(self) -> None:
+        """Purge settled tasks whose ``settled_ts`` is older than 24 hours.
+
+        Removes them from in-memory state and, when a DB is configured, deletes
+        the task row together with its enrollments, submissions, verdicts and
+        payments so the DB does not grow unboundedly on a long-lived Render
+        deployment.
+
+        Only tasks that have a recorded ``settled_ts > 0`` are eligible — tasks
+        that were settled by the :meth:`_load_state_from_db` catch-up path (which
+        stamps the current time) are also cleaned up correctly.
+        """
+        now = time.time()
+        cutoff = now - _CLEANUP_AGE_SECONDS
+
+        to_purge: list[str] = []
+        for jid in list(self.state.settled_jobs):
+            # settled_ts lives only in the DB row; we look it up only when DB
+            # is active.  Without a DB we track settled_ts on a best-effort
+            # basis via the in-memory _settled_ts dict maintained below.
+            settled_at = self._settled_ts.get(jid, 0.0)
+            if settled_at > 0 and settled_at < cutoff:
+                to_purge.append(jid)
+
+        if not to_purge:
+            return
+
+        for jid in to_purge:
+            self.state.jobs.pop(jid, None)
+            self.state.settled_jobs.discard(jid)
+            self.state.job_topics.pop(jid, None)
+            self.state.task_specs.pop(jid, None)
+            self.state.submissions.pop(jid, None)
+            self.state.enrollments.pop(jid, None)
+            self._settled_ts.pop(jid, None)
+            print(f"  [scheduler] purged old task {jid} (settled >24 h ago)")
+
+        if using_persistent_db():
+            try:
+                with get_session() as db:
+                    for jid in to_purge:
+                        # Delete child rows first to avoid FK-constraint errors
+                        # on databases that enforce them (Postgres).
+                        for model in (EnrollmentRow, SubmissionRow, VerdictRow, PaymentRow):
+                            rows = db.exec(
+                                _select(model)
+                                .where(model.job_id == jid)  # type: ignore[attr-defined]
+                            ).all()
+                            for row in rows:
+                                db.delete(row)
+                        task_row = db.get(TaskRow, jid)
+                        if task_row:
+                            db.delete(task_row)
+                    db.commit()
+            except Exception as exc:  # noqa: BLE001
+                print(f"  [scheduler] cleanup DB error: {exc}")
 
     def _generate_task(self) -> None:
         """Create a new invoice-extraction job with its own HCS topic.
@@ -340,6 +434,7 @@ class Scheduler:
         the scheduler thread.
         """
         try:
+            import json as _json
             from taskforge.ledger.hcs_client import create_topic
             task = pick_task()
             task_topic_id = create_topic(memo="taskforge-task")
@@ -352,6 +447,20 @@ class Scheduler:
                     "invoice_text": task["invoice_text"],
                 }
                 self.state.submissions[job.job_id] = []
+            if using_persistent_db():
+                with get_session() as db:
+                    db.merge(TaskRow(
+                        job_id=job.job_id,
+                        topic_id=task_topic_id,
+                        description=job.description,
+                        invoice_text=task["invoice_text"],
+                        ground_truth_json=_json.dumps(task["ground_truth"]),
+                        bounty_hbar=job.bounty_amount,
+                        deadline_ts=job.deadline_ts,
+                        settled=False,
+                        settled_ts=0.0,
+                    ))
+                    db.commit()
             print(
                 f"  [scheduler] auto-generated job {job.job_id}  "
                 f"task-topic={task_topic_id}  HCS: {hcs_tx}"
