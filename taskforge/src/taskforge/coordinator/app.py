@@ -31,6 +31,7 @@ from taskforge.coordinator.server import (
     save_platform_topic_to_db,
 )
 from taskforge.coordinator import server as _srv
+from taskforge.db import init_db
 from taskforge.ledger.hcs_client import create_topic
 
 # ── ANSI colours ──────────────────────────────────────────────────────────────
@@ -64,6 +65,9 @@ def _bootstrap() -> FastAPI:
     print(f"\n{_B}{'='*64}{_X}")
     print(f"{_B}  TaskForge v2 — Coordinator Server{_X}")
     print(f"{_B}{'='*64}{_X}\n")
+
+    # ── Ensure all DB tables exist before any DB reads ────────────────────────
+    init_db()
 
     # ── Step 1: Platform HCS topic ────────────────────────────────────────────
     print(f"{_B}[1/3] Platform HCS topic (agent registrations){_X}")
