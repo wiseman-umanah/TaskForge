@@ -36,6 +36,8 @@ import os
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, ClassVar, Generator
 
+import sqlalchemy
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -263,14 +265,34 @@ class PlatformRow(SQLModel, table=True):
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
 
-def init_db() -> None:
-    """Create all tables if DATABASE_URL is set. No-op otherwise.
+# Columns added after initial deployment — applied via ALTER TABLE on every
+# startup so existing Postgres databases gain the new columns automatically.
+# ``ADD COLUMN IF NOT EXISTS`` is idempotent and safe to run every boot.
+_MIGRATIONS: list[str] = [
+    "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS invoice_text TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS ground_truth_json TEXT NOT NULL DEFAULT '{}'",
+    "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS settled_ts FLOAT NOT NULL DEFAULT 0.0",
+]
 
-    Safe to call on every startup — ``CREATE TABLE IF NOT EXISTS`` semantics.
+
+def init_db() -> None:
+    """Create all tables and apply incremental column migrations.
+
+    Safe to call on every startup:
+
+    - ``CREATE TABLE IF NOT EXISTS`` creates any missing tables.
+    - Each entry in :data:`_MIGRATIONS` is executed with
+      ``ADD COLUMN IF NOT EXISTS`` so it is a no-op when the column already
+      exists.  This means no external migration tool or manual SQL commands
+      are needed when the schema changes — redeploying the app is sufficient.
     """
     if _engine is None:
         return
     SQLModel.metadata.create_all(_engine)
+    # Run incremental column migrations
+    with _engine.begin() as conn:
+        for stmt in _MIGRATIONS:
+            conn.execute(sqlalchemy.text(stmt))
     print(f"  [db] tables ready  ({_DATABASE_URL})")
 
 
